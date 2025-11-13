@@ -243,86 +243,58 @@ def bar_progress(current, total, width=80):
 
 def get_db_engine(config, db_name=None):
     """
-    Cria e retorna um engine do SQLAlchemy para o SQL Server.
-    Se 'db_name' é None, usa o banco de dados padrão do servidor (geralmente 'master').
+    Cria e retorna um engine do SQLAlchemy para PostgreSQL.
     """
-    # Se db_name não for fornecido, não especifica um banco de dados na URL,
-    # conectando-se ao padrão do servidor (master).
-    database = db_name if db_name else config["db_name"]
+    from sqlalchemy import create_engine
     
-    connection_url = URL.create(
-        "mssql+pyodbc",
-        username=config["db_user"],
-        password=config["db_password"],
-        host=config["db_server"],
-        database=database,
-        query={
-            "driver": config["db_driver"],
-            "autocommit": "True",
-            "fast_executemany": "True"  # Otimização para inserts rápidos
-        },
-    )
+    # Use 'postgres' como banco padrão se não especificado
+    if db_name is None:
+        db_name = 'postgres'
+    
+    # Construa a string de conexão PostgreSQL
+    connection_string = f"postgresql://{config['db_user']}:{config['db_password']}@{config['db_server']}:{config['db_port']}/{db_name}"
     
     try:
-        engine = create_engine(
-            connection_url,
-            echo=False,  # Desativa logging de SQL para melhor performance
-            pool_size=20,
-            max_overflow=0
-        )
-        # Testa a conexão
+        engine = create_engine(connection_string)
+        # Teste de conexão
         with engine.connect() as connection:
-            db_context = database if database else 'master'
-            logging.info(f"Conexão com o servidor SQL '{config['db_server']}' (banco: {db_context}) bem-sucedida!")
+            logging.info(f"✅ Conexão com PostgreSQL '{config['db_server']}' (banco: {db_name}) bem-sucedida!")
         return engine
     except Exception as e:
-        if 'Login failed' in str(e):
-            logging.error("Falha de logon. Verifique se o usuário e a senha no seu arquivo .env estão corretos.")
-        logging.error(f"Falha ao criar engine de conexão com o SQL Server. Erro: {e}")
+        logging.error(f"❌ Falha ao conectar com PostgreSQL: {e}")
         sys.exit(1)
-
+        
 def prepare_database(master_engine, db_name):
     """
-    Garante que o banco de dados de destino exista e esteja limpo.
-    Usa um engine conectado ao 'master' para realizar as operações de DROP e CREATE.
+    Garante que o banco de dados de destino exista e esteja limpo - PostgreSQL version.
     """
-    logging.info(f"Preparando o banco de dados '{db_name}'...")
+    logging.info(f"Preparando o banco de dados PostgreSQL '{db_name}'...")
+    
     with master_engine.connect() as connection:
         connection = connection.execution_options(isolation_level="AUTOCOMMIT")
         try:
-            # Verifica se o banco já existe
-            result = connection.execute(text(f"SELECT COUNT(*) FROM sys.databases WHERE name = '{db_name}'")).scalar()
+            # Verifica se o banco existe
+            result = connection.execute(text(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'"))
+            exists = result.scalar()
             
-            if result > 0:
-                logging.info(f"Banco de dados '{db_name}' já existe. Recriando...")
-                # Desconecta todas as conexões existentes
+            if exists:
+                logging.info(f"Removendo o banco de dados '{db_name}'...")
+                # Encerra conexões ativas primeiro
                 connection.execute(text(f"""
-                    ALTER DATABASE [{db_name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
-                    DROP DATABASE [{db_name}];
+                    SELECT pg_terminate_backend(pid) 
+                    FROM pg_stat_activity 
+                    WHERE datname = '{db_name}' AND pid <> pg_backend_pid()
                 """))
+                connection.execute(text(f"DROP DATABASE IF EXISTS {db_name}"))
             
             logging.info(f"Criando o banco de dados '{db_name}'...")
-            connection.execute(text(f"""
-                CREATE DATABASE [{db_name}]
-                ON PRIMARY 
-                (NAME = '{db_name}_data', 
-                 FILENAME = '/var/opt/mssql/data/{db_name}_data.mdf', 
-                 SIZE = 500MB, 
-                 MAXSIZE = UNLIMITED, 
-                 FILEGROWTH = 100MB)
-                LOG ON 
-                (NAME = '{db_name}_log',
-                 FILENAME = '/var/opt/mssql/data/{db_name}_log.ldf',
-                 SIZE = 100MB,
-                 MAXSIZE = UNLIMITED,
-                 FILEGROWTH = 50MB);
-            """))
-            logging.info(f"Banco de dados '{db_name}' criado com sucesso.")
+            connection.execute(text(f"CREATE DATABASE {db_name}"))
+            logging.info(f"✅ Banco de dados '{db_name}' criado com sucesso.")
+            
         except Exception as e:
-            logging.error(f"Falha ao preparar o banco de dados '{db_name}'. Erro: {e}")
-            logging.error("Verifique as permissões do usuário no servidor SQL.")
+            logging.error(f"❌ Falha ao preparar o banco de dados '{db_name}': {e}")
             sys.exit(1)
-
+            
 def setup_database_tables(engine):
     """
     Cria ou recria todas as tabelas necessárias no banco de dados usando o engine do SQLAlchemy.
